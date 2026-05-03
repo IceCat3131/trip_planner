@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>免费旅游行程规划器</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="app-header">
+    <div>
+      <h1>旅游行程规划器</h1>
+      <p>免费地图版 · OpenStreetMap</p>
+    </div>
+    <span class="version">v1.0-free</span>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>1. 基本信息</h2>
+      <label>出发时间</label>
+      <input id="startTime" type="time" value="08:00" />
+
+      <label>出发地</label>
+      <div class="search-row">
+        <input id="startSearch" type="search" placeholder="输入出发地，比如 San Jose" autocomplete="off" />
+        <button id="searchStartBtn">搜索</button>
+      </div>
+      <div id="startResults" class="results"></div>
+      <div id="startPicked" class="picked">未选择出发地</div>
+
+      <label>终点</label>
+      <div class="search-row">
+        <input id="endSearch" type="search" placeholder="输入终点，可与出发地相同" autocomplete="off" />
+        <button id="searchEndBtn">搜索</button>
+      </div>
+      <div id="endResults" class="results"></div>
+      <div id="endPicked" class="picked">未选择终点</div>
+    </section>
+
+    <section class="card">
+      <h2>2. 添加景点</h2>
+      <label>景点 / 地址</label>
+      <div class="search-row">
+        <input id="spotSearch" type="search" placeholder="输入景点，比如 Golden Gate Bridge" autocomplete="off" />
+        <button id="searchSpotBtn">搜索</button>
+      </div>
+      <div id="spotResults" class="results"></div>
+
+      <label>游玩时间</label>
+      <div class="stay-row">
+        <input id="stayMinutes" type="number" min="0" step="5" value="60" />
+        <span>分钟</span>
+      </div>
+      <div id="spotPicked" class="picked">未选择景点</div>
+      <button id="addSpotBtn" class="primary">添加到行程</button>
+    </section>
+
+    <section class="card">
+      <h2>3. 行程列表</h2>
+      <div id="stopsList" class="stops-empty">还没有添加景点</div>
+      <button id="buildBtn" class="primary">生成行程时间表</button>
+      <button id="demoBtn" class="secondary">载入湾区演示路线</button>
+    </section>
+
+    <section class="card">
+      <h2>4. 地图</h2>
+      <div id="map"></div>
+      <p class="hint">地图来自 OpenStreetMap。路线计算使用 OpenRouteService，需要在 config.js 里填 API Key。</p>
+    </section>
+
+    <section class="card">
+      <h2>5. 时间表</h2>
+      <div id="summary" class="summary">等待生成行程</div>
+      <div id="timeline" class="timeline"></div>
+    </section>
+  </main>
+
+  <template id="resultTemplate">
+    <button class="result-item"></button>
+  </template>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
