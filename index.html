@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>免费旅游行程规划器</title>
+  <title>免费旅游行程规划器｜安全后端版</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <link rel="stylesheet" href="style.css" />
 </head>
@@ -11,9 +11,9 @@
   <header class="app-header">
     <div>
       <h1>旅游行程规划器</h1>
-      <p>免费地图版 · OpenStreetMap</p>
+      <p>免费地图版 · Worker 隐藏 API Key</p>
     </div>
-    <span class="version">v1.0-free</span>
+    <span class="version">v1.1-worker</span>
   </header>
 
   <main>
@@ -67,7 +67,7 @@
     <section class="card">
       <h2>4. 地图</h2>
       <div id="map"></div>
-      <p class="hint">地图来自 OpenStreetMap。路线计算使用 OpenRouteService，需要在 config.js 里填 API Key。</p>
+      <p class="hint">地图来自 OpenStreetMap。路线计算通过 Cloudflare Worker 转发，API Key 不放前端。</p>
     </section>
 
     <section class="card">

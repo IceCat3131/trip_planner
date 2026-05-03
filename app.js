@@ -1,4 +1,6 @@
 const CFG = window.APP_CONFIG || {};
+const WORKER_BASE_URL = (CFG.WORKER_BASE_URL || "").replace(/\/$/, "");
+const hasWorker = !!WORKER_BASE_URL;
 const hasORSKey = CFG.ORS_API_KEY && !CFG.ORS_API_KEY.includes("请在这里填写");
 
 let startPoint = null;
@@ -32,6 +34,14 @@ function timeFromInput(value) {
 function escapeHtml(s) {
   return String(s || "").replace(/[&<>'"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[c]));
 }
+async function safeErrorMessage(res) {
+  try {
+    const data = await res.json();
+    return data && (data.error || data.message);
+  } catch (_) {
+    return "";
+  }
+}
 function pointLabel(p) {
   if (!p) return "未选择";
   return `${p.name}<br><small>${p.address || ""}</small>`;
@@ -48,8 +58,49 @@ function haversineMiles(a, b) {
   return 2 * R * Math.asin(Math.sqrt(h));
 }
 
+function normalizeGeocodeData(data) {
+  if (Array.isArray(data.results)) return data.results;
+  if (Array.isArray(data.features)) {
+    return data.features.map(f => ({
+      name: f.properties?.name || f.properties?.label || "未命名地点",
+      address: f.properties?.label || "",
+      lat: f.geometry?.coordinates?.[1],
+      lng: f.geometry?.coordinates?.[0]
+    })).filter(x => Number.isFinite(Number(x.lat)) && Number.isFinite(Number(x.lng)));
+  }
+  return [];
+}
+
 async function geocode(query) {
   if (!query.trim()) return [];
+  if (hasWorker) {
+    // 兼容两种 Worker：新版 /api/geocode，和你现在教程里部署的 /search
+    const urls = [];
+    const url1 = new URL(`${WORKER_BASE_URL}/api/geocode`);
+    url1.searchParams.set("text", query.trim());
+    url1.searchParams.set("size", "6");
+    url1.searchParams.set("country", "US");
+    urls.push(url1);
+
+    const url2 = new URL(`${WORKER_BASE_URL}/search`);
+    url2.searchParams.set("q", query.trim());
+    urls.push(url2);
+
+    let lastMsg = "地点搜索失败";
+    for (const url of urls) {
+      try {
+        const res = await fetch(url);
+        if (!res.ok) { lastMsg = await safeErrorMessage(res) || lastMsg; continue; }
+        const data = await res.json();
+        const results = normalizeGeocodeData(data);
+        if (results.length) return results;
+      } catch (e) {
+        lastMsg = e.message || lastMsg;
+      }
+    }
+    throw new Error(lastMsg);
+  }
+
   if (hasORSKey) {
     const url = new URL("https://api.openrouteservice.org/geocode/search");
     url.searchParams.set("api_key", CFG.ORS_API_KEY);
@@ -176,9 +227,67 @@ function updateMap(polylineCoords) {
   if (pts.length) map.fitBounds(group.getBounds().pad(0.2));
 }
 
+function normalizeRouteData(data) {
+  if (Array.isArray(data.segments)) {
+    return {
+      segments: data.segments.map(seg => ({
+        driveMinutes: Math.round(Number(seg.driveMinutes ?? seg.duration / 60 ?? 0)),
+        miles: Number(seg.miles ?? seg.distance / 1609.344 ?? 0)
+      })),
+      geometry: data.geometry || []
+    };
+  }
+  const feature = data.features?.[0];
+  if (feature) {
+    return {
+      segments: (feature.properties?.segments || []).map(seg => ({
+        driveMinutes: Math.round((seg.duration || 0) / 60),
+        miles: (seg.distance || 0) / 1609.344
+      })),
+      geometry: feature.geometry?.coordinates || []
+    };
+  }
+  const route = data.routes?.[0];
+  if (route) {
+    return {
+      segments: (route.segments || []).map(seg => ({
+        driveMinutes: Math.round((seg.duration || 0) / 60),
+        miles: (seg.distance || 0) / 1609.344
+      })),
+      geometry: []
+    };
+  }
+  return { segments: [], geometry: [] };
+}
+
 async function computeRoute() {
   const points = [startPoint, ...stops, endPoint];
   if (points.some(p => !p)) throw new Error("请先选择出发地、至少一个景点、终点");
+
+  if (hasWorker) {
+    // 兼容两种 Worker：新版 /api/route，和你现在教程里部署的 /route
+    const endpoints = [`${WORKER_BASE_URL}/api/route`, `${WORKER_BASE_URL}/route`];
+    let lastMsg = "路线计算失败，请检查 Worker 或 OpenRouteService Key";
+    for (const endpoint of endpoints) {
+      try {
+        const res = await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ coordinates: points.map(toLonLat) })
+        });
+        if (!res.ok) { lastMsg = await safeErrorMessage(res) || lastMsg; continue; }
+        const data = await res.json();
+        const normalized = normalizeRouteData(data);
+        if (normalized.segments.length) {
+          updateMap(normalized.geometry || []);
+          return normalized.segments;
+        }
+      } catch (e) {
+        lastMsg = e.message || lastMsg;
+      }
+    }
+    throw new Error(lastMsg);
+  }
 
   if (hasORSKey) {
     const res = await fetch("https://api.openrouteservice.org/v2/directions/driving-car/geojson", {
