@@ -3,86 +3,105 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>免费旅游行程规划器｜安全后端版</title>
+  <title>Trip Planner v4</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <header class="app-header">
+  <header class="topbar">
     <div>
-      <h1>旅游行程规划器</h1>
-      <p>免费地图版 · Worker 隐藏 API Key</p>
+      <div class="brand">Trip Planner v4</div>
+      <div class="sub">多计划 · 导游讲解稿 · 定位提醒</div>
     </div>
-    <span class="version">v3.3.1-search-fix</span>
+    <button id="btnLogout" class="ghost hidden">退出</button>
   </header>
 
   <main>
-    <section class="card">
-      <h2>1. 基本信息</h2>
-      <label>出发时间</label>
-      <input id="startTime" type="time" value="08:00" />
-
-      <p class="hint">地点统一在下面添加：第一个地点就是出发地，最后一个地点就是终点。手机当前位置只用于地图蓝点和打开 Google Maps 导航，不计入本网站时间表。</p>
-    </section>
-
-    <section class="card">
-      <h2>2. 添加地点 / 景点</h2>
-      <label>地点 / 景点 / 地址</label>
-      <div class="search-row">
-        <input id="spotSearch" type="search" placeholder="先添加出发地，再添加景点，最后添加终点" autocomplete="off" />
-        <button id="searchSpotBtn" type="button">搜索</button>
+    <section id="authPanel" class="card">
+      <h2>登录 / 注册</h2>
+      <label>用户名</label>
+      <input id="authUsername" placeholder="例如 leo" autocomplete="username" />
+      <label>密码</label>
+      <input id="authPassword" type="password" placeholder="至少 6 位" autocomplete="current-password" />
+      <div class="row">
+        <button id="btnLogin">登录</button>
+        <button id="btnRegister" class="secondary">注册</button>
       </div>
-      <div id="spotResults" class="results"></div>
-
-      <label>游玩时间</label>
-      <div class="stay-row">
-        <input id="stayMinutes" type="number" min="0" step="5" value="60" />
-        <span>分钟</span>
-      </div>
-      <div id="spotPicked" class="picked">未选择地点</div>
-      <button id="addSpotBtn" type="button" class="primary">添加地点到行程</button>
+      <p class="hint">账号用于保存多个旅行计划，换设备登录后也能看到。</p>
     </section>
 
-    <section class="card">
-      <h2>3. 行程列表</h2>
-      <div id="stopsList" class="stops-empty">还没有添加地点</div>
-      <button id="buildBtn" type="button" class="primary">生成行程时间表</button>
-      <button id="demoBtn" type="button" class="secondary">载入湾区演示路线</button>
-    </section>
+    <section id="appPanel" class="hidden">
+      <section class="card">
+        <div class="sectionHead">
+          <h2>我的计划</h2>
+          <button id="btnNewPlan" class="secondary">+ 新计划</button>
+        </div>
+        <div id="plansList" class="plans"></div>
+      </section>
 
-    <section class="card">
-      <h2>4. 地图</h2>
-      <div id="map"></div>
-      <p class="hint">地图来自 OpenStreetMap。v3 会优先显示 ORS 返回的真实道路路线；如果路线形状获取失败，才显示虚线兜底。</p>
-    </section>
+      <section id="editor" class="card hidden">
+        <h2>计划编辑</h2>
+        <label>计划名称</label>
+        <input id="planName" placeholder="例如：17 Mile + Carmel 一日游" />
+        <label>出发时间</label>
+        <input id="startTime" type="time" value="08:00" />
+        <div class="row">
+          <button id="btnSavePlan">保存计划</button>
+          <button id="btnDeletePlan" class="danger">删除</button>
+        </div>
+      </section>
 
-    <section class="card">
-      <h2>5. 导航辅助</h2>
-      <div class="nav-actions">
-        <button id="locateBtn" type="button" class="primary">📍 显示我的当前位置</button>
-        <button id="watchBtn" type="button" class="secondary">开始实时跟随</button>
-        <button id="googleNavBtn" type="button" class="secondary">打开 Google Maps 导航</button>
-      </div>
-      <div id="navStatus" class="nav-status">还未获取手机位置。手机浏览器第一次会弹出定位授权，请选择允许。</div>
-    </section>
+      <section id="pointAdder" class="card hidden">
+        <h2>添加地点 / 景点</h2>
+        <label>搜索地点</label>
+        <div class="searchRow">
+          <input id="searchText" placeholder="输入景点、地址、酒店、餐厅" />
+          <button id="btnSearch" class="secondary">搜索</button>
+        </div>
+        <div id="searchStatus" class="hint"></div>
+        <div id="searchResults" class="results"></div>
 
-    <section class="card">
-      <h2>6. 行程进度</h2>
-      <div id="progress" class="progress-box">
-        <div class="progress-empty">生成行程后，这里会显示当前进行到哪一站。</div>
-      </div>
-    </section>
+        <label>停留时间（分钟）</label>
+        <input id="stayMinutes" type="number" min="0" value="45" />
+        <label>讲解稿</label>
+        <textarea id="guideText" rows="5" placeholder="到达这个景点附近时显示给导游看的讲解内容"></textarea>
+        <button id="btnAddSelected" disabled>添加到计划</button>
+      </section>
 
-    <section class="card">
-      <h2>7. 时间表</h2>
-      <div id="summary" class="summary">等待生成行程</div>
-      <div id="timeline" class="timeline"></div>
+      <section id="pointsPanel" class="card hidden">
+        <div class="sectionHead">
+          <h2>地点列表</h2>
+          <button id="btnBuildRoute" class="secondary">生成时间表</button>
+        </div>
+        <div id="pointsList"></div>
+      </section>
+
+      <section id="mapPanel" class="card hidden">
+        <div class="sectionHead">
+          <h2>地图 / 导航辅助</h2>
+          <button id="btnLocate" class="secondary">📍 我的位置</button>
+        </div>
+        <div id="map"></div>
+        <div class="row">
+          <button id="btnGoogleNav">打开 Google 导航</button>
+          <button id="btnWatch" class="secondary">开始定位提醒</button>
+        </div>
+        <div id="navInfo" class="hint">生成路线后显示进度。</div>
+      </section>
+
+      <section id="timelinePanel" class="card hidden">
+        <h2>行程时间表</h2>
+        <div class="progressWrap"><div id="progressBar"></div></div>
+        <div id="timeline"></div>
+      </section>
+
+      <section id="guidePanel" class="card hidden guideCard">
+        <h2 id="guideTitle">讲解稿</h2>
+        <div id="guideBody"></div>
+        <button id="btnCloseGuide" class="secondary">关闭</button>
+      </section>
     </section>
   </main>
-
-  <template id="resultTemplate">
-    <button class="result-item"></button>
-  </template>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="config.js"></script>
