@@ -62,6 +62,9 @@ function pointLabel(p) {
   if (!p) return "未选择";
   return `${p.name}<br><small>${p.address || ""}</small>`;
 }
+function routePoints() {
+  return stops.filter(Boolean);
+}
 function toLonLat(p) { return [Number(p.lng), Number(p.lat)]; }
 function haversineMiles(a, b) {
   const R = 3958.8;
@@ -127,11 +130,15 @@ function nextStopFromLocation(loc) {
   return { index: bestIndex, point: pts[bestIndex], miles: bestMiles };
 }
 function googleMapsUrl() {
-  const points = [startPoint, ...stops, endPoint].filter(Boolean);
-  if (!endPoint || points.length < 2) return null;
-  const origin = currentLocation ? `${currentLocation.lat},${currentLocation.lng}` : `${points[0].lat},${points[0].lng}`;
-  const destination = `${endPoint.lat},${endPoint.lng}`;
-  const waypoints = stops.map(p => `${p.lat},${p.lng}`).join('|');
+  const points = routePoints();
+  if (points.length < 2) return null;
+  const first = points[0];
+  const last = points[points.length - 1];
+  // 手机当前位置只作为 Google Maps 的实际起点；行程里的第一个地点仍然必须作为第一个 waypoint 保留。
+  const origin = currentLocation ? `${currentLocation.lat},${currentLocation.lng}` : `${first.lat},${first.lng}`;
+  const destination = `${last.lat},${last.lng}`;
+  const waypointPoints = currentLocation ? points.slice(0, -1) : points.slice(1, -1);
+  const waypoints = waypointPoints.map(p => `${p.lat},${p.lng}`).join('|');
   const url = new URL('https://www.google.com/maps/dir/');
   url.searchParams.set('api', '1');
   url.searchParams.set('travelmode', 'driving');
@@ -323,21 +330,24 @@ function renderStops() {
   const box = $("stopsList");
   if (!stops.length) {
     box.className = "stops-empty";
-    box.innerHTML = "还没有添加景点";
+    box.innerHTML = "还没有添加地点。请先添加出发地，再添加景点，最后添加终点。";
     return;
   }
   box.className = "";
   box.innerHTML = "";
+  const lastIndex = stops.length - 1;
   stops.forEach((s, i) => {
     const div = document.createElement("div");
     div.className = "stop-card";
     const delta = s.actualDeltaMinutes || 0;
+    const role = i === 0 ? "出发地" : (i === lastIndex ? "终点" : `景点${i}`);
+    const canStay = i > 0 && i < lastIndex;
     div.innerHTML = `
       <div class="stop-head">
         <div>
-          <div class="stop-title">${i + 1}. ${escapeHtml(s.name)} · 游玩 ${s.stayMinutes} 分钟</div>
+          <div class="stop-title">${i + 1}. ${escapeHtml(s.name)} · ${role}${canStay ? ` · 游玩 ${s.stayMinutes} 分钟` : ""}</div>
           <div class="stop-address">${escapeHtml(s.address)}</div>
-          <div class="stop-address">实际调整：${delta > 0 ? "+" : ""}${delta} 分钟</div>
+          ${canStay ? `<div class="stop-address">实际调整：${delta > 0 ? "+" : ""}${delta} 分钟</div>` : `<div class="stop-address">此地点不计游玩时间</div>`}
         </div>
         <div class="stop-actions">
           <button data-act="up">↑</button>
@@ -345,18 +355,19 @@ function renderStops() {
           <button data-act="del">删</button>
         </div>
       </div>
-      <div class="delay-row">
+      ${canStay ? `<div class="delay-row">
         <button data-delta="-15">提前15</button>
         <button data-delta="15">延后15</button>
         <button data-delta="30">延后30</button>
         <button data-reset="1">按计划</button>
-      </div>
+      </div>` : ""}
     `;
     div.querySelector('[data-act="up"]').onclick = () => { if (i > 0) { [stops[i-1], stops[i]] = [stops[i], stops[i-1]]; routeSegments = []; routeGeometry = []; renderStops(); updateMap(); resetScheduleView(); }};
     div.querySelector('[data-act="down"]').onclick = () => { if (i < stops.length - 1) { [stops[i+1], stops[i]] = [stops[i], stops[i+1]]; routeSegments = []; routeGeometry = []; renderStops(); updateMap(); resetScheduleView(); }};
     div.querySelector('[data-act="del"]').onclick = () => { stops.splice(i,1); routeSegments = []; routeGeometry = []; renderStops(); updateMap(); resetScheduleView(); };
     div.querySelectorAll('[data-delta]').forEach(b => b.onclick = () => { s.actualDeltaMinutes = (s.actualDeltaMinutes || 0) + Number(b.dataset.delta); renderStops(); if (routeSegments.length) buildSchedule(false); });
-    div.querySelector('[data-reset]').onclick = () => { s.actualDeltaMinutes = 0; renderStops(); if (routeSegments.length) buildSchedule(false); };
+    const resetBtn = div.querySelector('[data-reset]');
+    if (resetBtn) resetBtn.onclick = () => { s.actualDeltaMinutes = 0; renderStops(); if (routeSegments.length) buildSchedule(false); };
     box.appendChild(div);
   });
 }
@@ -408,7 +419,7 @@ function updateMap(geometry) {
   if (routeLine) { map.removeLayer(routeLine); routeLine = null; }
   if (shadowRouteLine) { map.removeLayer(shadowRouteLine); shadowRouteLine = null; }
 
-  const pts = [startPoint, ...stops, endPoint].filter(Boolean);
+  const pts = routePoints();
   pts.forEach((p, idx) => {
     let label = String(idx);
     let kind = "spot";
@@ -484,8 +495,8 @@ function normalizeRouteData(data) {
 }
 
 async function computeRoute() {
-  const points = [startPoint, ...stops, endPoint];
-  if (points.some(p => !p)) throw new Error("请先选择出发地、至少一个景点、终点");
+  const points = routePoints();
+  if (points.length < 2) throw new Error("请至少添加两个地点：第一个地点作为出发地，最后一个地点作为终点");
 
   // 这里故意只传 coordinates。
   // 原因：你 Cloudflare 上可能是旧版 Worker（/route 会原样转发到 ORS），
@@ -610,17 +621,22 @@ async function buildSchedule(needRoute = true) {
   summary.textContent = needRoute ? "计算真实道路路线中..." : "更新时间表中...";
   timeline.innerHTML = "";
   try {
+    const points = routePoints();
+    if (points.length < 2) throw new Error("请至少添加两个地点：第一个地点作为出发地，最后一个地点作为终点");
     if (needRoute || !routeSegments.length) routeSegments = await computeRoute();
     let t = timeFromInput($("startTime").value);
     let totalDrive = 0, totalStay = 0, totalMiles = 0, totalDelta = 0;
     const rows = [];
     const progressEvents = [];
-
     const tripStart = new Date(t);
-    rows.push({ type: "start", title: `出发：${startPoint.name}`, lines: [`时间：${fmtTime(t)}`, startPoint.address] });
+    const first = points[0];
 
-    for (let i = 0; i < stops.length; i++) {
-      const seg = routeSegments[i];
+    rows.push({ type: "start", title: `出发：${first.name}`, lines: [`时间：${fmtTime(t)}`, first.address] });
+
+    for (let i = 1; i < points.length; i++) {
+      const seg = routeSegments[i - 1];
+      const target = points[i];
+      const isEnd = i === points.length - 1;
       const travelStart = new Date(t);
       totalDrive += seg.driveMinutes;
       totalMiles += seg.miles;
@@ -629,50 +645,40 @@ async function buildSchedule(needRoute = true) {
       progressEvents.push({
         start: travelStart,
         end: arrive,
-        title: `路上：前往 ${stops[i].name}`,
+        title: `路上：前往 ${target.name}`,
         detail: `${fmtTime(travelStart)} 出发，预计 ${fmtTime(arrive)} 到达`
       });
 
-      const stay = Number(stops[i].stayMinutes || 0);
-      const delta = Number(stops[i].actualDeltaMinutes || 0);
-      totalStay += stay;
-      totalDelta += delta;
-      const visitStart = new Date(t);
-      t = addMinutes(t, stay + delta);
-      const leave = new Date(t);
-      progressEvents.push({
-        start: visitStart,
-        end: leave,
-        title: `游玩：${stops[i].name}`,
-        detail: `${fmtTime(visitStart)} 到达，预计 ${fmtTime(leave)} 离开`
-      });
-
-      rows.push({
-        type: "spot",
-        title: `${i + 1}. ${stops[i].name}`,
-        lines: [
-          `路程：${seg.miles.toFixed(1)} miles / 约 ${seg.driveMinutes} 分钟`,
-          `到达：${fmtTime(arrive)}`,
-          `离开：${fmtTime(leave)}，计划游玩 ${stay} 分钟${delta ? `，实际调整 ${delta > 0 ? "+" : ""}${delta} 分钟` : ""}`,
-          stops[i].address
-        ]
-      });
+      if (isEnd) {
+        rows.push({ type: "end", title: `到达终点：${target.name}`, lines: [`时间：${fmtTime(arrive)}`, `最后一段：${seg.miles.toFixed(1)} miles / 约 ${seg.driveMinutes} 分钟`, target.address] });
+      } else {
+        const stay = Number(target.stayMinutes || 0);
+        const delta = Number(target.actualDeltaMinutes || 0);
+        totalStay += stay;
+        totalDelta += delta;
+        const visitStart = new Date(t);
+        t = addMinutes(t, stay + delta);
+        const leave = new Date(t);
+        progressEvents.push({
+          start: visitStart,
+          end: leave,
+          title: `游玩：${target.name}`,
+          detail: `${fmtTime(visitStart)} 到达，预计 ${fmtTime(leave)} 离开`
+        });
+        rows.push({
+          type: "spot",
+          title: `${i}. ${target.name}`,
+          lines: [
+            `路程：${seg.miles.toFixed(1)} miles / 约 ${seg.driveMinutes} 分钟`,
+            `到达：${fmtTime(arrive)}`,
+            `离开：${fmtTime(leave)}，计划游玩 ${stay} 分钟${delta ? `，实际调整 ${delta > 0 ? "+" : ""}${delta} 分钟` : ""}`,
+            target.address
+          ]
+        });
+      }
     }
-    const lastSeg = routeSegments[routeSegments.length - 1];
-    const finalTravelStart = new Date(t);
-    totalDrive += lastSeg.driveMinutes;
-    totalMiles += lastSeg.miles;
-    t = addMinutes(t, lastSeg.driveMinutes);
+
     const tripEnd = new Date(t);
-    progressEvents.push({
-      start: finalTravelStart,
-      end: tripEnd,
-      title: `路上：前往终点 ${endPoint.name}`,
-      detail: `${fmtTime(finalTravelStart)} 出发，预计 ${fmtTime(tripEnd)} 到达`
-    });
-
-    rows.push({ type: "end", title: `到达终点：${endPoint.name}`, lines: [`时间：${fmtTime(t)}`, `最后一段：${lastSeg.miles.toFixed(1)} miles / 约 ${lastSeg.driveMinutes} 分钟`, endPoint.address] });
-
     const realRouteNote = routeGeometry && (Array.isArray(routeGeometry) ? routeGeometry.length : routeGeometry.coordinates?.length)
       ? "地图已显示真实道路路线"
       : "地图为虚线兜底显示，路线时间仍按道路 API 结果";
@@ -690,15 +696,13 @@ async function buildSchedule(needRoute = true) {
   }
 }
 
-$("searchStartBtn").onclick = () => searchInto("startSearch", "startResults", p => { startPoint = p; $("startPicked").innerHTML = pointLabel(p); routeSegments = []; routeGeometry = []; resetScheduleView(); });
-$("searchEndBtn").onclick = () => searchInto("endSearch", "endResults", p => { endPoint = p; $("endPicked").innerHTML = pointLabel(p); routeSegments = []; routeGeometry = []; resetScheduleView(); });
 $("searchSpotBtn").onclick = () => searchInto("spotSearch", "spotResults", p => { selectedSpot = p; $("spotPicked").innerHTML = pointLabel(p); });
 
 $("addSpotBtn").onclick = () => {
-  if (!selectedSpot) { alert("请先搜索并选择景点"); return; }
+  if (!selectedSpot) { alert("请先搜索并选择地点"); return; }
   stops.push({ ...selectedSpot, stayMinutes: Number($("stayMinutes").value || 0), actualDeltaMinutes: 0 });
   selectedSpot = null;
-  $("spotPicked").textContent = "未选择景点";
+  $("spotPicked").textContent = "未选择地点";
   $("spotSearch").value = "";
   routeSegments = [];
   routeGeometry = [];
@@ -722,15 +726,13 @@ $("buildBtn").onclick = async () => {
 };
 
 $("demoBtn").onclick = () => {
-  startPoint = { name: "San Jose", address: "San Jose, CA", lat: 37.3382, lng: -121.8863 };
-  endPoint = { name: "San Jose", address: "San Jose, CA", lat: 37.3382, lng: -121.8863 };
   stops = [
+    { name: "San Jose", address: "San Jose, CA", lat: 37.3382, lng: -121.8863, stayMinutes: 0, actualDeltaMinutes: 0 },
     { name: "Stanford University", address: "450 Jane Stanford Way, Stanford, CA", lat: 37.4275, lng: -122.1697, stayMinutes: 60, actualDeltaMinutes: 0 },
     { name: "Golden Gate Bridge", address: "Golden Gate Bridge, San Francisco, CA", lat: 37.8199, lng: -122.4783, stayMinutes: 45, actualDeltaMinutes: 0 },
-    { name: "Fisherman's Wharf", address: "Fisherman's Wharf, San Francisco, CA", lat: 37.8080, lng: -122.4177, stayMinutes: 90, actualDeltaMinutes: 0 }
+    { name: "Fisherman's Wharf", address: "Fisherman's Wharf, San Francisco, CA", lat: 37.8080, lng: -122.4177, stayMinutes: 90, actualDeltaMinutes: 0 },
+    { name: "San Jose", address: "San Jose, CA", lat: 37.3382, lng: -121.8863, stayMinutes: 0, actualDeltaMinutes: 0 }
   ];
-  $("startPicked").innerHTML = pointLabel(startPoint);
-  $("endPicked").innerHTML = pointLabel(endPoint);
   routeSegments = [];
   routeGeometry = [];
   renderStops();

@@ -13,7 +13,7 @@
       <h1>旅游行程规划器</h1>
       <p>免费地图版 · Worker 隐藏 API Key</p>
     </div>
-    <span class="version">v3.2-navigation-helper</span>
+    <span class="version">v3.3-unified-points</span>
   </header>
 
   <main>
@@ -22,28 +22,14 @@
       <label>出发时间</label>
       <input id="startTime" type="time" value="08:00" />
 
-      <label>出发地</label>
-      <div class="search-row">
-        <input id="startSearch" type="search" placeholder="输入出发地，比如 San Jose" autocomplete="off" />
-        <button id="searchStartBtn">搜索</button>
-      </div>
-      <div id="startResults" class="results"></div>
-      <div id="startPicked" class="picked">未选择出发地</div>
-
-      <label>终点</label>
-      <div class="search-row">
-        <input id="endSearch" type="search" placeholder="输入终点，可与出发地相同" autocomplete="off" />
-        <button id="searchEndBtn">搜索</button>
-      </div>
-      <div id="endResults" class="results"></div>
-      <div id="endPicked" class="picked">未选择终点</div>
+      <p class="hint">地点统一在下面添加：第一个地点就是出发地，最后一个地点就是终点。手机当前位置只用于地图蓝点和打开 Google Maps 导航，不计入本网站时间表。</p>
     </section>
 
     <section class="card">
-      <h2>2. 添加景点</h2>
-      <label>景点 / 地址</label>
+      <h2>2. 添加地点 / 景点</h2>
+      <label>地点 / 景点 / 地址</label>
       <div class="search-row">
-        <input id="spotSearch" type="search" placeholder="输入景点，比如 Golden Gate Bridge" autocomplete="off" />
+        <input id="spotSearch" type="search" placeholder="先添加出发地，再添加景点，最后添加终点" autocomplete="off" />
         <button id="searchSpotBtn">搜索</button>
       </div>
       <div id="spotResults" class="results"></div>
@@ -53,13 +39,13 @@
         <input id="stayMinutes" type="number" min="0" step="5" value="60" />
         <span>分钟</span>
       </div>
-      <div id="spotPicked" class="picked">未选择景点</div>
-      <button id="addSpotBtn" class="primary">添加到行程</button>
+      <div id="spotPicked" class="picked">未选择地点</div>
+      <button id="addSpotBtn" class="primary">添加地点到行程</button>
     </section>
 
     <section class="card">
       <h2>3. 行程列表</h2>
-      <div id="stopsList" class="stops-empty">还没有添加景点</div>
+      <div id="stopsList" class="stops-empty">还没有添加地点</div>
       <button id="buildBtn" class="primary">生成行程时间表</button>
       <button id="demoBtn" class="secondary">载入湾区演示路线</button>
     </section>
