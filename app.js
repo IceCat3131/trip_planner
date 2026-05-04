@@ -37,12 +37,33 @@ const distMeters = (a,b) => {
 function api(path, opts={}) {
   const headers = {'Content-Type':'application/json', ...(opts.headers||{})};
   if (token) headers.Authorization = `Bearer ${token}`;
+
   return fetch(`${API_BASE}${path}`, {...opts, headers}).then(async r => {
     const text = await r.text();
     let data = null;
-    try { data = text ? JSON.parse(text) : null; } catch { data = {error:text}; }
-    if (!r.ok) throw new Error(data?.error || `HTTP ${r.status}`);
+
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = { error: text };
+    }
+
+    if (!r.ok) {
+      let msg = data?.error ?? data?.message ?? text ?? `HTTP ${r.status}`;
+
+      if (typeof msg === 'object') {
+        msg = msg.message || msg.error || JSON.stringify(msg);
+      }
+
+      throw new Error(msg || `HTTP ${r.status}`);
+    }
+
     return data;
+  }).catch(err => {
+    if (err instanceof TypeError && String(err.message || '').toLowerCase().includes('fetch')) {
+      throw new Error('无法连接后端 API，请检查 Worker 地址、部署状态或 CORS 设置');
+    }
+    throw err;
   });
 }
 
