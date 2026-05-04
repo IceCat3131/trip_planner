@@ -239,60 +239,70 @@ function normalizeGeocodeData(data) {
 }
 
 async function geocode(query) {
-  if (!query.trim()) return [];
+  const q = (query || "").trim();
+  if (!q) return [];
+
+  // v3.3.1 修复：你的线上 Worker 已验证可用的是 /search。
+  // 所以这里优先请求 /search，避免先打新版 /api/geocode 后在部分浏览器里看起来“没反应”。
   if (hasWorker) {
     const urls = [];
-    const url1 = new URL(`${WORKER_BASE_URL}/api/geocode`);
-    url1.searchParams.set("text", query.trim());
-    url1.searchParams.set("size", "6");
-    url1.searchParams.set("country", "US");
-    urls.push(url1);
 
-    const url2 = new URL(`${WORKER_BASE_URL}/search`);
-    url2.searchParams.set("q", query.trim());
-    urls.push(url2);
+    const legacyUrl = new URL(`${WORKER_BASE_URL}/search`);
+    legacyUrl.searchParams.set("q", q);
+    urls.push(legacyUrl);
+
+    const newUrl = new URL(`${WORKER_BASE_URL}/api/geocode`);
+    newUrl.searchParams.set("text", q);
+    newUrl.searchParams.set("size", "6");
+    newUrl.searchParams.set("country", "US");
+    urls.push(newUrl);
 
     let lastMsg = "地点搜索失败";
     for (const url of urls) {
       try {
-        const res = await fetch(url);
-        if (!res.ok) { lastMsg = await safeErrorMessage(res) || lastMsg; continue; }
+        const res = await fetch(url.toString(), { method: "GET" });
+        if (!res.ok) {
+          lastMsg = await safeErrorMessage(res) || `HTTP ${res.status}`;
+          continue;
+        }
         const data = await res.json();
         const results = normalizeGeocodeData(data);
         if (results.length) return results;
+        lastMsg = "没有搜索结果";
       } catch (e) {
         lastMsg = e.message || lastMsg;
       }
     }
-    throw new Error(lastMsg);
+    // Worker 搜不到时，兜底走 Nominatim，保证按钮不是死的。
   }
 
   if (hasORSKey) {
     const url = new URL("https://api.openrouteservice.org/geocode/search");
     url.searchParams.set("api_key", CFG.ORS_API_KEY);
-    url.searchParams.set("text", query.trim());
+    url.searchParams.set("text", q);
     url.searchParams.set("size", "6");
     url.searchParams.set("boundary.country", "US");
     const res = await fetch(url);
     if (!res.ok) throw new Error("地点搜索失败");
     const data = await res.json();
-    return normalizeGeocodeData(data);
+    const results = normalizeGeocodeData(data);
+    if (results.length) return results;
   }
 
   const url = new URL("https://nominatim.openstreetmap.org/search");
-  url.searchParams.set("q", query.trim());
+  url.searchParams.set("q", q);
   url.searchParams.set("format", "jsonv2");
-  url.searchParams.set("limit", "6");
+  url.searchParams.set("limit", "8");
   url.searchParams.set("countrycodes", "us");
   const res = await fetch(url, { headers: { "Accept": "application/json" } });
   if (!res.ok) throw new Error("地点搜索失败");
   const data = await res.json();
   return data.map(x => ({
-    name: x.name || x.display_name.split(",")[0],
-    address: x.display_name,
+    name: x.name || (x.display_name || "未命名地点").split(",")[0],
+    address: x.display_name || "",
     lat: Number(x.lat),
     lng: Number(x.lon)
-  }));
+  })).filter(x => Number.isFinite(x.lat) && Number.isFinite(x.lng));
 }
 
 function renderResults(containerId, results, onPick) {
@@ -697,6 +707,12 @@ async function buildSchedule(needRoute = true) {
 }
 
 $("searchSpotBtn").onclick = () => searchInto("spotSearch", "spotResults", p => { selectedSpot = p; $("spotPicked").innerHTML = pointLabel(p); });
+$("spotSearch").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    $("searchSpotBtn").click();
+  }
+});
 
 $("addSpotBtn").onclick = () => {
   if (!selectedSpot) { alert("请先搜索并选择地点"); return; }
