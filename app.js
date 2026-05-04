@@ -8,12 +8,16 @@ let endPoint = null;
 let selectedSpot = null;
 let stops = [];
 let routeSegments = [];
+let routeGeometry = [];
 let routeLine = null;
+let shadowRouteLine = null;
 let markers = [];
+let lastProgressEvents = [];
+let progressTimer = null;
 
 const $ = (id) => document.getElementById(id);
 
-const map = L.map("map").setView(CFG.DEFAULT_CENTER || [37.3382, -121.8863], CFG.DEFAULT_ZOOM || 9);
+const map = L.map("map", { zoomControl: true }).setView(CFG.DEFAULT_CENTER || [37.3382, -121.8863], CFG.DEFAULT_ZOOM || 9);
 L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
   maxZoom: 19,
   attribution: "&copy; OpenStreetMap contributors"
@@ -37,7 +41,7 @@ function escapeHtml(s) {
 async function safeErrorMessage(res) {
   try {
     const data = await res.json();
-    return data && (data.error || data.message);
+    return data && (data.error || data.message || data?.error?.message);
   } catch (_) {
     return "";
   }
@@ -74,7 +78,6 @@ function normalizeGeocodeData(data) {
 async function geocode(query) {
   if (!query.trim()) return [];
   if (hasWorker) {
-    // 兼容两种 Worker：新版 /api/geocode，和你现在教程里部署的 /search
     const urls = [];
     const url1 = new URL(`${WORKER_BASE_URL}/api/geocode`);
     url1.searchParams.set("text", query.trim());
@@ -110,15 +113,9 @@ async function geocode(query) {
     const res = await fetch(url);
     if (!res.ok) throw new Error("地点搜索失败");
     const data = await res.json();
-    return (data.features || []).map(f => ({
-      name: f.properties.name || f.properties.label,
-      address: f.properties.label,
-      lat: f.geometry.coordinates[1],
-      lng: f.geometry.coordinates[0]
-    }));
+    return normalizeGeocodeData(data);
   }
 
-  // 无 API Key 演示：用 Nominatim 搜索。注意：正式产品不要高频调用公共服务。
   const url = new URL("https://nominatim.openstreetmap.org/search");
   url.searchParams.set("q", query.trim());
   url.searchParams.set("format", "jsonv2");
@@ -149,7 +146,7 @@ function renderResults(containerId, results, onPick) {
     btn.onclick = () => {
       onPick(p);
       box.innerHTML = "";
-      updateMap();
+      updateMap(routeGeometry);
     };
     box.appendChild(btn);
   });
@@ -199,32 +196,95 @@ function renderStops() {
         <button data-reset="1">按计划</button>
       </div>
     `;
-    div.querySelector('[data-act="up"]').onclick = () => { if (i > 0) { [stops[i-1], stops[i]] = [stops[i], stops[i-1]]; renderStops(); updateMap(); }};
-    div.querySelector('[data-act="down"]').onclick = () => { if (i < stops.length - 1) { [stops[i+1], stops[i]] = [stops[i], stops[i+1]]; renderStops(); updateMap(); }};
-    div.querySelector('[data-act="del"]').onclick = () => { stops.splice(i,1); renderStops(); updateMap(); };
-    div.querySelectorAll('[data-delta]').forEach(b => b.onclick = () => { s.actualDeltaMinutes = (s.actualDeltaMinutes || 0) + Number(b.dataset.delta); renderStops(); if (routeSegments.length) buildSchedule(); });
-    div.querySelector('[data-reset]').onclick = () => { s.actualDeltaMinutes = 0; renderStops(); if (routeSegments.length) buildSchedule(); };
+    div.querySelector('[data-act="up"]').onclick = () => { if (i > 0) { [stops[i-1], stops[i]] = [stops[i], stops[i-1]]; routeSegments = []; routeGeometry = []; renderStops(); updateMap(); resetScheduleView(); }};
+    div.querySelector('[data-act="down"]').onclick = () => { if (i < stops.length - 1) { [stops[i+1], stops[i]] = [stops[i], stops[i+1]]; routeSegments = []; routeGeometry = []; renderStops(); updateMap(); resetScheduleView(); }};
+    div.querySelector('[data-act="del"]').onclick = () => { stops.splice(i,1); routeSegments = []; routeGeometry = []; renderStops(); updateMap(); resetScheduleView(); };
+    div.querySelectorAll('[data-delta]').forEach(b => b.onclick = () => { s.actualDeltaMinutes = (s.actualDeltaMinutes || 0) + Number(b.dataset.delta); renderStops(); if (routeSegments.length) buildSchedule(false); });
+    div.querySelector('[data-reset]').onclick = () => { s.actualDeltaMinutes = 0; renderStops(); if (routeSegments.length) buildSchedule(false); };
     box.appendChild(div);
   });
 }
 
-function updateMap(polylineCoords) {
+function makeMarkerIcon(label, kind) {
+  return L.divIcon({
+    className: "route-marker-wrap",
+    html: `<div class="route-marker ${kind || "spot"}">${escapeHtml(label)}</div>`,
+    iconSize: [30, 30],
+    iconAnchor: [15, 15],
+    popupAnchor: [0, -15]
+  });
+}
+
+function normalizeLatLngsFromGeometry(geometry) {
+  if (!geometry) return [];
+  let coords = [];
+  if (Array.isArray(geometry)) coords = geometry;
+  else if (geometry.type === "LineString") coords = geometry.coordinates || [];
+  else if (geometry.type === "MultiLineString") coords = (geometry.coordinates || []).flat();
+  return coords
+    .map(c => Array.isArray(c) && c.length >= 2 ? [Number(c[1]), Number(c[0])] : null)
+    .filter(c => c && Number.isFinite(c[0]) && Number.isFinite(c[1]));
+}
+
+// 备用：如果 ORS Worker 返回 encoded polyline，也能解码。默认精度 5。
+function decodePolyline(str, precision = 5) {
+  if (typeof str !== "string" || !str.length) return [];
+  let index = 0, lat = 0, lng = 0;
+  const coordinates = [];
+  const factor = Math.pow(10, precision);
+  while (index < str.length) {
+    let result = 0, shift = 0, byte = null;
+    do { byte = str.charCodeAt(index++) - 63; result |= (byte & 0x1f) << shift; shift += 5; } while (byte >= 0x20 && index < str.length);
+    const deltaLat = (result & 1) ? ~(result >> 1) : (result >> 1);
+    lat += deltaLat;
+    result = 0; shift = 0;
+    do { byte = str.charCodeAt(index++) - 63; result |= (byte & 0x1f) << shift; shift += 5; } while (byte >= 0x20 && index < str.length);
+    const deltaLng = (result & 1) ? ~(result >> 1) : (result >> 1);
+    lng += deltaLng;
+    coordinates.push([lat / factor, lng / factor]);
+  }
+  return coordinates;
+}
+
+function updateMap(geometry) {
   markers.forEach(m => map.removeLayer(m));
   markers = [];
   if (routeLine) { map.removeLayer(routeLine); routeLine = null; }
+  if (shadowRouteLine) { map.removeLayer(shadowRouteLine); shadowRouteLine = null; }
 
   const pts = [startPoint, ...stops, endPoint].filter(Boolean);
   pts.forEach((p, idx) => {
-    const label = idx === 0 ? "出发" : (idx === pts.length - 1 ? "终点" : `景点${idx}`);
-    markers.push(L.marker([p.lat, p.lng]).addTo(map).bindPopup(`${label}: ${escapeHtml(p.name)}`));
+    let label = String(idx);
+    let kind = "spot";
+    if (idx === 0) { label = "起"; kind = "start"; }
+    else if (idx === pts.length - 1) { label = "终"; kind = "end"; }
+    markers.push(
+      L.marker([p.lat, p.lng], { icon: makeMarkerIcon(label, kind) })
+        .addTo(map)
+        .bindPopup(`${idx === 0 ? "出发" : (idx === pts.length - 1 ? "终点" : `景点${idx}`)}: ${escapeHtml(p.name)}`)
+    );
   });
-  if (polylineCoords && polylineCoords.length) {
-    routeLine = L.polyline(polylineCoords.map(c => [c[1], c[0]]), { weight: 5 }).addTo(map);
+
+  const routeLatLngs = normalizeLatLngsFromGeometry(geometry);
+  if (routeLatLngs.length >= 2) {
+    shadowRouteLine = L.polyline(routeLatLngs, { weight: 8, opacity: 0.22, className: "route-shadow" }).addTo(map);
+    routeLine = L.polyline(routeLatLngs, { weight: 5, opacity: 0.95, className: "route-real" }).addTo(map);
   } else if (pts.length >= 2) {
-    routeLine = L.polyline(pts.map(p => [p.lat, p.lng]), { weight: 4, dashArray: "8 8" }).addTo(map);
+    routeLine = L.polyline(pts.map(p => [p.lat, p.lng]), { weight: 4, dashArray: "8 8", opacity: 0.65, className: "route-fallback" }).addTo(map);
   }
-  const group = L.featureGroup(markers.concat(routeLine ? [routeLine] : []));
-  if (pts.length) map.fitBounds(group.getBounds().pad(0.2));
+
+  const layers = markers.concat(routeLine ? [routeLine] : []).concat(shadowRouteLine ? [shadowRouteLine] : []);
+  if (layers.length) {
+    const group = L.featureGroup(layers);
+    map.fitBounds(group.getBounds().pad(0.18));
+  }
+}
+
+function extractSegmentsFromFeature(feature) {
+  return (feature.properties?.segments || []).map(seg => ({
+    driveMinutes: Math.round((seg.duration || 0) / 60),
+    miles: (seg.distance || 0) / 1609.344
+  }));
 }
 
 function normalizeRouteData(data) {
@@ -237,24 +297,31 @@ function normalizeRouteData(data) {
       geometry: data.geometry || []
     };
   }
+
   const feature = data.features?.[0];
   if (feature) {
     return {
-      segments: (feature.properties?.segments || []).map(seg => ({
-        driveMinutes: Math.round((seg.duration || 0) / 60),
-        miles: (seg.distance || 0) / 1609.344
-      })),
-      geometry: feature.geometry?.coordinates || []
+      segments: extractSegmentsFromFeature(feature),
+      geometry: feature.geometry || feature.geometry?.coordinates || []
     };
   }
+
   const route = data.routes?.[0];
   if (route) {
+    let geometry = [];
+    if (route.geometry?.type) geometry = route.geometry;
+    else if (Array.isArray(route.geometry?.coordinates)) geometry = route.geometry;
+    else if (typeof route.geometry === "string") {
+      // ORS 默认 JSON 可能返回 encoded polyline。坐标顺序通常可直接作为 lat,lng 画；如果明显偏离，会使用点位虚线兜底。
+      const decoded = decodePolyline(route.geometry, 5);
+      geometry = decoded.map(x => [x[1], x[0]]); // 转成 [lng, lat]，给 normalizeLatLngsFromGeometry 统一处理
+    }
     return {
       segments: (route.segments || []).map(seg => ({
         driveMinutes: Math.round((seg.duration || 0) / 60),
         miles: (seg.distance || 0) / 1609.344
       })),
-      geometry: []
+      geometry
     };
   }
   return { segments: [], geometry: [] };
@@ -264,8 +331,15 @@ async function computeRoute() {
   const points = [startPoint, ...stops, endPoint];
   if (points.some(p => !p)) throw new Error("请先选择出发地、至少一个景点、终点");
 
+  const body = {
+    coordinates: points.map(toLonLat),
+    geometry: true,
+    geometry_format: "geojson",
+    instructions: false,
+    units: "mi"
+  };
+
   if (hasWorker) {
-    // 兼容两种 Worker：新版 /api/route，和你现在教程里部署的 /route
     const endpoints = [`${WORKER_BASE_URL}/api/route`, `${WORKER_BASE_URL}/route`];
     let lastMsg = "路线计算失败，请检查 Worker 或 OpenRouteService Key";
     for (const endpoint of endpoints) {
@@ -273,13 +347,15 @@ async function computeRoute() {
         const res = await fetch(endpoint, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ coordinates: points.map(toLonLat) })
+          body: JSON.stringify(body)
         });
         if (!res.ok) { lastMsg = await safeErrorMessage(res) || lastMsg; continue; }
         const data = await res.json();
         const normalized = normalizeRouteData(data);
         if (normalized.segments.length) {
-          updateMap(normalized.geometry || []);
+          routeSegments = normalized.segments;
+          routeGeometry = normalized.geometry || [];
+          updateMap(routeGeometry);
           return normalized.segments;
         }
       } catch (e) {
@@ -296,55 +372,115 @@ async function computeRoute() {
         "Authorization": CFG.ORS_API_KEY,
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({ coordinates: points.map(toLonLat) })
+      body: JSON.stringify({ coordinates: points.map(toLonLat), instructions: false, units: "mi" })
     });
     if (!res.ok) throw new Error("路线计算失败，请检查 OpenRouteService API Key");
     const data = await res.json();
-    const feature = data.features[0];
-    const segments = feature.properties.segments.map(seg => ({
-      driveMinutes: Math.round(seg.duration / 60),
-      miles: seg.distance / 1609.344
-    }));
-    updateMap(feature.geometry.coordinates);
-    return segments;
+    const normalized = normalizeRouteData(data);
+    routeSegments = normalized.segments;
+    routeGeometry = normalized.geometry;
+    updateMap(routeGeometry);
+    return normalized.segments;
   }
 
-  // 没有 API Key：直线距离估算。能演示逻辑，但不是实际道路时间。
   const avg = CFG.AVERAGE_DRIVE_SPEED_MPH || 35;
   const segments = [];
   for (let i = 0; i < points.length - 1; i++) {
     const miles = haversineMiles(points[i], points[i+1]) * 1.25;
     segments.push({ miles, driveMinutes: Math.max(3, Math.round(miles / avg * 60)) });
   }
+  routeGeometry = [];
   updateMap();
   return segments;
 }
 
-async function buildSchedule() {
+function resetScheduleView() {
+  $("summary").textContent = "路线已变化，请重新生成行程";
+  $("timeline").innerHTML = "";
+  renderProgress([]);
+}
+
+function renderProgress(events) {
+  const box = $("progress");
+  if (!box) return;
+  lastProgressEvents = events || [];
+  if (!lastProgressEvents.length) {
+    box.innerHTML = `<div class="progress-empty">生成行程后，这里会显示当前进行到哪一站。</div>`;
+    return;
+  }
+  const now = new Date();
+  const first = lastProgressEvents[0];
+  const last = lastProgressEvents[lastProgressEvents.length - 1];
+  const total = Math.max(1, last.end - first.start);
+  const done = Math.min(1, Math.max(0, (now - first.start) / total));
+  let current = lastProgressEvents.find(e => now >= e.start && now <= e.end);
+  if (!current) {
+    current = now < first.start
+      ? { title: "还没到出发时间", detail: `计划 ${fmtTime(first.start)} 出发` }
+      : { title: "行程已结束", detail: `已于 ${fmtTime(last.end)} 到达终点` };
+  }
+  box.innerHTML = `
+    <div class="progress-top">
+      <div>
+        <div class="progress-title">${escapeHtml(current.title)}</div>
+        <div class="progress-detail">${escapeHtml(current.detail || "")}</div>
+      </div>
+      <div class="progress-percent">${Math.round(done * 100)}%</div>
+    </div>
+    <div class="progress-track"><div class="progress-fill" style="width:${Math.round(done * 100)}%"></div></div>
+    <div class="progress-foot">当前时间：${fmtTime(now)} · 不调用路线 API，只在本地更新时间进度</div>
+  `;
+}
+
+function scheduleProgressRefresh(events) {
+  if (progressTimer) clearInterval(progressTimer);
+  renderProgress(events);
+  progressTimer = setInterval(() => renderProgress(lastProgressEvents), 60 * 1000);
+}
+
+async function buildSchedule(needRoute = true) {
   const summary = $("summary");
   const timeline = $("timeline");
-  summary.textContent = "计算中...";
+  summary.textContent = needRoute ? "计算真实道路路线中..." : "更新时间表中...";
   timeline.innerHTML = "";
   try {
-    if (!routeSegments.length) routeSegments = await computeRoute();
+    if (needRoute || !routeSegments.length) routeSegments = await computeRoute();
     let t = timeFromInput($("startTime").value);
     let totalDrive = 0, totalStay = 0, totalMiles = 0, totalDelta = 0;
     const rows = [];
+    const progressEvents = [];
 
+    const tripStart = new Date(t);
     rows.push({ type: "start", title: `出发：${startPoint.name}`, lines: [`时间：${fmtTime(t)}`, startPoint.address] });
 
     for (let i = 0; i < stops.length; i++) {
       const seg = routeSegments[i];
+      const travelStart = new Date(t);
       totalDrive += seg.driveMinutes;
       totalMiles += seg.miles;
       t = addMinutes(t, seg.driveMinutes);
       const arrive = new Date(t);
+      progressEvents.push({
+        start: travelStart,
+        end: arrive,
+        title: `路上：前往 ${stops[i].name}`,
+        detail: `${fmtTime(travelStart)} 出发，预计 ${fmtTime(arrive)} 到达`
+      });
+
       const stay = Number(stops[i].stayMinutes || 0);
       const delta = Number(stops[i].actualDeltaMinutes || 0);
       totalStay += stay;
       totalDelta += delta;
+      const visitStart = new Date(t);
       t = addMinutes(t, stay + delta);
       const leave = new Date(t);
+      progressEvents.push({
+        start: visitStart,
+        end: leave,
+        title: `游玩：${stops[i].name}`,
+        detail: `${fmtTime(visitStart)} 到达，预计 ${fmtTime(leave)} 离开`
+      });
+
       rows.push({
         type: "spot",
         title: `${i + 1}. ${stops[i].name}`,
@@ -357,25 +493,39 @@ async function buildSchedule() {
       });
     }
     const lastSeg = routeSegments[routeSegments.length - 1];
+    const finalTravelStart = new Date(t);
     totalDrive += lastSeg.driveMinutes;
     totalMiles += lastSeg.miles;
     t = addMinutes(t, lastSeg.driveMinutes);
+    const tripEnd = new Date(t);
+    progressEvents.push({
+      start: finalTravelStart,
+      end: tripEnd,
+      title: `路上：前往终点 ${endPoint.name}`,
+      detail: `${fmtTime(finalTravelStart)} 出发，预计 ${fmtTime(tripEnd)} 到达`
+    });
+
     rows.push({ type: "end", title: `到达终点：${endPoint.name}`, lines: [`时间：${fmtTime(t)}`, `最后一段：${lastSeg.miles.toFixed(1)} miles / 约 ${lastSeg.driveMinutes} 分钟`, endPoint.address] });
 
-    summary.innerHTML = `终点预计到达：${fmtTime(t)}<br>总路程约 ${totalMiles.toFixed(1)} miles，总开车约 ${totalDrive} 分钟，景点计划游玩 ${totalStay} 分钟，实际调整 ${totalDelta > 0 ? "+" : ""}${totalDelta} 分钟`;
+    const realRouteNote = routeGeometry && (Array.isArray(routeGeometry) ? routeGeometry.length : routeGeometry.coordinates?.length)
+      ? "地图已显示真实道路路线"
+      : "地图为虚线兜底显示，路线时间仍按道路 API 结果";
+    summary.innerHTML = `终点预计到达：${fmtTime(t)}<br>总路程约 ${totalMiles.toFixed(1)} miles，总开车约 ${totalDrive} 分钟，景点计划游玩 ${totalStay} 分钟，实际调整 ${totalDelta > 0 ? "+" : ""}${totalDelta} 分钟<br><span class="summary-note">${realRouteNote}</span>`;
     timeline.innerHTML = rows.map(r => `
-      <div class="timeline-item">
+      <div class="timeline-item ${escapeHtml(r.type)}">
         <div class="timeline-title">${escapeHtml(r.title)}</div>
         ${r.lines.map(line => `<div class="timeline-line">${escapeHtml(line)}</div>`).join("")}
       </div>
     `).join("");
+    scheduleProgressRefresh(progressEvents.length ? progressEvents : [{ start: tripStart, end: tripEnd, title: "行程中", detail: `${fmtTime(tripStart)} - ${fmtTime(tripEnd)}` }]);
   } catch (e) {
     summary.textContent = e.message;
+    renderProgress([]);
   }
 }
 
-$("searchStartBtn").onclick = () => searchInto("startSearch", "startResults", p => { startPoint = p; $("startPicked").innerHTML = pointLabel(p); routeSegments = []; });
-$("searchEndBtn").onclick = () => searchInto("endSearch", "endResults", p => { endPoint = p; $("endPicked").innerHTML = pointLabel(p); routeSegments = []; });
+$("searchStartBtn").onclick = () => searchInto("startSearch", "startResults", p => { startPoint = p; $("startPicked").innerHTML = pointLabel(p); routeSegments = []; routeGeometry = []; resetScheduleView(); });
+$("searchEndBtn").onclick = () => searchInto("endSearch", "endResults", p => { endPoint = p; $("endPicked").innerHTML = pointLabel(p); routeSegments = []; routeGeometry = []; resetScheduleView(); });
 $("searchSpotBtn").onclick = () => searchInto("spotSearch", "spotResults", p => { selectedSpot = p; $("spotPicked").innerHTML = pointLabel(p); });
 
 $("addSpotBtn").onclick = () => {
@@ -385,10 +535,12 @@ $("addSpotBtn").onclick = () => {
   $("spotPicked").textContent = "未选择景点";
   $("spotSearch").value = "";
   routeSegments = [];
+  routeGeometry = [];
   renderStops();
   updateMap();
+  resetScheduleView();
 };
-$("buildBtn").onclick = async () => { routeSegments = []; await buildSchedule(); };
+$("buildBtn").onclick = async () => { routeSegments = []; routeGeometry = []; await buildSchedule(true); };
 
 $("demoBtn").onclick = () => {
   startPoint = { name: "San Jose", address: "San Jose, CA", lat: 37.3382, lng: -121.8863 };
@@ -401,9 +553,12 @@ $("demoBtn").onclick = () => {
   $("startPicked").innerHTML = pointLabel(startPoint);
   $("endPicked").innerHTML = pointLabel(endPoint);
   routeSegments = [];
+  routeGeometry = [];
   renderStops();
   updateMap();
+  resetScheduleView();
 };
 
 renderStops();
 updateMap();
+renderProgress([]);
