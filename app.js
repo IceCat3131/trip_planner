@@ -41,9 +41,16 @@ function escapeHtml(s) {
 async function safeErrorMessage(res) {
   try {
     const data = await res.json();
-    return data && (data.error || data.message || data?.error?.message);
+    if (typeof data.error === "string") return data.error;
+    if (data.error && typeof data.error.message === "string") return data.error.message;
+    if (typeof data.message === "string") return data.message;
+    if (data.detail && typeof data.detail === "object") {
+      if (typeof data.detail.error === "string") return data.detail.error;
+      if (data.detail.error && typeof data.detail.error.message === "string") return data.detail.error.message;
+    }
+    return res.status ? `HTTP ${res.status}` : "";
   } catch (_) {
-    return "";
+    return res.status ? `HTTP ${res.status}` : "";
   }
 }
 function pointLabel(p) {
@@ -331,13 +338,11 @@ async function computeRoute() {
   const points = [startPoint, ...stops, endPoint];
   if (points.some(p => !p)) throw new Error("请先选择出发地、至少一个景点、终点");
 
-  const body = {
-    coordinates: points.map(toLonLat),
-    geometry: true,
-    geometry_format: "geojson",
-    instructions: false,
-    units: "mi"
-  };
+  // 这里故意只传 coordinates。
+  // 原因：你 Cloudflare 上可能是旧版 Worker（/route 会原样转发到 ORS），
+  // 如果前端传 geometry_format / units 等额外字段，旧版 Worker 可能让 ORS 返回 400，
+  // 表现就是点击“生成时间表”后没有结果。新版 /api/route 和旧版 /route 都兼容这个最小格式。
+  const body = { coordinates: points.map(toLonLat) };
 
   if (hasWorker) {
     const endpoints = [`${WORKER_BASE_URL}/api/route`, `${WORKER_BASE_URL}/route`];
@@ -349,7 +354,10 @@ async function computeRoute() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body)
         });
-        if (!res.ok) { lastMsg = await safeErrorMessage(res) || lastMsg; continue; }
+        if (!res.ok) {
+          lastMsg = await safeErrorMessage(res) || lastMsg;
+          continue;
+        }
         const data = await res.json();
         const normalized = normalizeRouteData(data);
         if (normalized.segments.length) {
@@ -358,6 +366,7 @@ async function computeRoute() {
           updateMap(routeGeometry);
           return normalized.segments;
         }
+        lastMsg = "路线 API 有返回，但没有 segments，请检查 Worker 路由接口";
       } catch (e) {
         lastMsg = e.message || lastMsg;
       }
@@ -540,7 +549,20 @@ $("addSpotBtn").onclick = () => {
   updateMap();
   resetScheduleView();
 };
-$("buildBtn").onclick = async () => { routeSegments = []; routeGeometry = []; await buildSchedule(true); };
+$("buildBtn").onclick = async () => {
+  const btn = $("buildBtn");
+  btn.disabled = true;
+  const oldText = btn.textContent;
+  btn.textContent = "正在生成...";
+  routeSegments = [];
+  routeGeometry = [];
+  try {
+    await buildSchedule(true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = oldText;
+  }
+};
 
 $("demoBtn").onclick = () => {
   startPoint = { name: "San Jose", address: "San Jose, CA", lat: 37.3382, lng: -121.8863 };
