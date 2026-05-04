@@ -14,6 +14,11 @@ let shadowRouteLine = null;
 let markers = [];
 let lastProgressEvents = [];
 let progressTimer = null;
+let currentLocation = null;
+let userMarker = null;
+let accuracyCircle = null;
+let watchId = null;
+let followUser = false;
 
 const $ = (id) => document.getElementById(id);
 
@@ -67,6 +72,150 @@ function haversineMiles(a, b) {
   const lat2 = toRad(b.lat);
   const h = Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLng/2)**2;
   return 2 * R * Math.asin(Math.sqrt(h));
+}
+
+function milesText(miles) {
+  if (!Number.isFinite(miles)) return "未知";
+  return miles < 0.2 ? `${Math.round(miles * 5280)} ft` : `${miles.toFixed(1)} miles`;
+}
+function toRad(deg) { return deg * Math.PI / 180; }
+function projectPoint(lat, lng, refLat) {
+  const R = 3958.8;
+  return { x: R * toRad(lng) * Math.cos(toRad(refLat)), y: R * toRad(lat) };
+}
+function pointSegmentDistanceMiles(p, a, b) {
+  const refLat = (p.lat + a.lat + b.lat) / 3;
+  const P = projectPoint(p.lat, p.lng, refLat);
+  const A = projectPoint(a.lat, a.lng, refLat);
+  const B = projectPoint(b.lat, b.lng, refLat);
+  const dx = B.x - A.x, dy = B.y - A.y;
+  const len2 = dx * dx + dy * dy;
+  if (!len2) return { distance: Math.hypot(P.x - A.x, P.y - A.y), t: 0 };
+  const t = Math.max(0, Math.min(1, ((P.x - A.x) * dx + (P.y - A.y) * dy) / len2));
+  const X = A.x + t * dx, Y = A.y + t * dy;
+  return { distance: Math.hypot(P.x - X, P.y - Y), t };
+}
+function routeLatLngs() {
+  return normalizeLatLngsFromGeometry(routeGeometry).map(x => ({ lat: x[0], lng: x[1] }));
+}
+function routeProgressByLocation(loc) {
+  const latlngs = routeLatLngs();
+  if (latlngs.length < 2 || !loc) return null;
+  let total = 0;
+  const lens = [];
+  for (let i = 0; i < latlngs.length - 1; i++) {
+    const d = haversineMiles(latlngs[i], latlngs[i+1]);
+    lens.push(d); total += d;
+  }
+  let best = { distance: Infinity, progressMiles: 0 };
+  let acc = 0;
+  for (let i = 0; i < latlngs.length - 1; i++) {
+    const r = pointSegmentDistanceMiles(loc, latlngs[i], latlngs[i+1]);
+    if (r.distance < best.distance) best = { distance: r.distance, progressMiles: acc + lens[i] * r.t };
+    acc += lens[i];
+  }
+  return { percent: total ? Math.max(0, Math.min(100, best.progressMiles / total * 100)) : 0, offRouteMiles: best.distance };
+}
+function nextStopFromLocation(loc) {
+  const pts = stops.length ? stops : [];
+  if (!loc || !pts.length) return null;
+  let bestIndex = 0, bestMiles = Infinity;
+  pts.forEach((p, i) => {
+    const miles = haversineMiles(loc, p);
+    if (miles < bestMiles) { bestMiles = miles; bestIndex = i; }
+  });
+  return { index: bestIndex, point: pts[bestIndex], miles: bestMiles };
+}
+function googleMapsUrl() {
+  const points = [startPoint, ...stops, endPoint].filter(Boolean);
+  if (!endPoint || points.length < 2) return null;
+  const origin = currentLocation ? `${currentLocation.lat},${currentLocation.lng}` : `${points[0].lat},${points[0].lng}`;
+  const destination = `${endPoint.lat},${endPoint.lng}`;
+  const waypoints = stops.map(p => `${p.lat},${p.lng}`).join('|');
+  const url = new URL('https://www.google.com/maps/dir/');
+  url.searchParams.set('api', '1');
+  url.searchParams.set('travelmode', 'driving');
+  url.searchParams.set('origin', origin);
+  url.searchParams.set('destination', destination);
+  if (waypoints) url.searchParams.set('waypoints', waypoints);
+  return url.toString();
+}
+function userIcon() {
+  return L.divIcon({ className: 'user-dot-wrap', html: '<div class="user-dot pulse"></div>', iconSize: [22, 22], iconAnchor: [11, 11] });
+}
+function updateUserOnMap(pos, pan = false) {
+  currentLocation = { lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy || 0 };
+  const ll = [currentLocation.lat, currentLocation.lng];
+  if (!userMarker) {
+    userMarker = L.marker(ll, { icon: userIcon(), zIndexOffset: 1000 }).addTo(map).bindPopup('我的当前位置');
+  } else {
+    userMarker.setLatLng(ll);
+  }
+  if (!accuracyCircle) {
+    accuracyCircle = L.circle(ll, { radius: currentLocation.accuracy, opacity: 0.25, fillOpacity: 0.08 }).addTo(map);
+  } else {
+    accuracyCircle.setLatLng(ll); accuracyCircle.setRadius(currentLocation.accuracy);
+  }
+  if (pan || followUser) map.setView(ll, Math.max(map.getZoom(), 14));
+  updateNavigationStatus();
+  renderProgress(lastProgressEvents);
+}
+function geoErrorText(err) {
+  if (!err) return '未知错误';
+  if (err.code === 1) return '定位权限被拒绝。请在浏览器地址栏/手机设置里允许 Location 定位。';
+  if (err.code === 2) return '暂时无法获取定位。请确认手机 GPS/定位服务已打开。';
+  if (err.code === 3) return '定位超时。请到室外或信号更好的地方再试。';
+  return err.message || '定位失败';
+}
+function updateNavigationStatus() {
+  const box = $('navStatus');
+  if (!box) return;
+  if (!currentLocation) {
+    box.textContent = '还未获取手机位置。点击“显示我的当前位置”后，手机会弹出定位授权。';
+    return;
+  }
+  const routeInfo = routeProgressByLocation(currentLocation);
+  const next = nextStopFromLocation(currentLocation);
+  const lines = [
+    `<strong>当前位置：</strong>${currentLocation.lat.toFixed(5)}, ${currentLocation.lng.toFixed(5)}，精度约 ${Math.round(currentLocation.accuracy || 0)} 米`
+  ];
+  if (next) lines.push(`<strong>最近景点：</strong>${escapeHtml(next.point.name)}，直线约 ${milesText(next.miles)}`);
+  if (routeInfo) lines.push(`<strong>路线进度：</strong>${Math.round(routeInfo.percent)}% · 偏离路线约 ${milesText(routeInfo.offRouteMiles)}`);
+  if (followUser) lines.push('实时跟随已开启：位置移动时地图会自动跟随。');
+  box.innerHTML = lines.join('<br>');
+}
+function locateOnce() {
+  if (!navigator.geolocation) { alert('这个浏览器不支持定位'); return; }
+  $('navStatus').textContent = '正在获取手机位置...';
+  navigator.geolocation.getCurrentPosition(
+    pos => updateUserOnMap(pos, true),
+    err => { $('navStatus').textContent = '获取位置失败：' + geoErrorText(err); },
+    { enableHighAccuracy: true, timeout: 12000, maximumAge: 5000 }
+  );
+}
+function toggleWatch() {
+  if (!navigator.geolocation) { alert('这个浏览器不支持定位'); return; }
+  const btn = $('watchBtn');
+  if (watchId !== null) {
+    navigator.geolocation.clearWatch(watchId);
+    watchId = null; followUser = false;
+    btn.textContent = '开始实时跟随';
+    updateNavigationStatus();
+    return;
+  }
+  followUser = true;
+  btn.textContent = '停止实时跟随';
+  $('navStatus').textContent = '正在启动实时跟随...';
+  watchId = navigator.geolocation.watchPosition(
+    pos => updateUserOnMap(pos, false),
+    err => { $('navStatus').textContent = '实时定位失败：' + geoErrorText(err); },
+    { enableHighAccuracy: true, timeout: 15000, maximumAge: 8000 }
+  );
+}
+function openGoogleNavigation() {
+  const url = googleMapsUrl();
+  if (!url) { alert('请先选择出发地、景点和终点，并生成路线'); return; }
+  window.open(url, '_blank');
 }
 
 function normalizeGeocodeData(data) {
@@ -280,7 +429,7 @@ function updateMap(geometry) {
     routeLine = L.polyline(pts.map(p => [p.lat, p.lng]), { weight: 4, dashArray: "8 8", opacity: 0.65, className: "route-fallback" }).addTo(map);
   }
 
-  const layers = markers.concat(routeLine ? [routeLine] : []).concat(shadowRouteLine ? [shadowRouteLine] : []);
+  const layers = markers.concat(routeLine ? [routeLine] : []).concat(shadowRouteLine ? [shadowRouteLine] : []).concat(userMarker ? [userMarker] : []);
   if (layers.length) {
     const group = L.featureGroup(layers);
     map.fitBounds(group.getBounds().pad(0.18));
@@ -364,6 +513,7 @@ async function computeRoute() {
           routeSegments = normalized.segments;
           routeGeometry = normalized.geometry || [];
           updateMap(routeGeometry);
+          updateNavigationStatus();
           return normalized.segments;
         }
         lastMsg = "路线 API 有返回，但没有 segments，请检查 Worker 路由接口";
@@ -389,6 +539,7 @@ async function computeRoute() {
     routeSegments = normalized.segments;
     routeGeometry = normalized.geometry;
     updateMap(routeGeometry);
+    updateNavigationStatus();
     return normalized.segments;
   }
 
@@ -438,6 +589,12 @@ function renderProgress(events) {
     </div>
     <div class="progress-track"><div class="progress-fill" style="width:${Math.round(done * 100)}%"></div></div>
     <div class="progress-foot">当前时间：${fmtTime(now)} · 不调用路线 API，只在本地更新时间进度</div>
+    ${currentLocation ? (() => {
+      const r = routeProgressByLocation(currentLocation);
+      const n = nextStopFromLocation(currentLocation);
+      if (!r && !n) return "";
+      return `<div class="progress-extra">${r ? `GPS路线进度：${Math.round(r.percent)}% · 偏离路线约 ${milesText(r.offRouteMiles)}` : ""}${r && n ? "<br>" : ""}${n ? `最近景点：${escapeHtml(n.point.name)} · 直线约 ${milesText(n.miles)}` : ""}</div>`;
+    })() : ""}
   `;
 }
 
@@ -581,6 +738,11 @@ $("demoBtn").onclick = () => {
   resetScheduleView();
 };
 
+if ($("locateBtn")) $("locateBtn").onclick = locateOnce;
+if ($("watchBtn")) $("watchBtn").onclick = toggleWatch;
+if ($("googleNavBtn")) $("googleNavBtn").onclick = openGoogleNavigation;
+
 renderStops();
 updateMap();
 renderProgress([]);
+updateNavigationStatus();

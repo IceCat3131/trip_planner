@@ -13,7 +13,7 @@
       <h1>旅游行程规划器</h1>
       <p>免费地图版 · Worker 隐藏 API Key</p>
     </div>
-    <span class="version">v3.1-fix-route-button</span>
+    <span class="version">v3.2-navigation-helper</span>
   </header>
 
   <main>
@@ -71,14 +71,24 @@
     </section>
 
     <section class="card">
-      <h2>5. 行程进度</h2>
+      <h2>5. 导航辅助</h2>
+      <div class="nav-actions">
+        <button id="locateBtn" class="primary">📍 显示我的当前位置</button>
+        <button id="watchBtn" class="secondary">开始实时跟随</button>
+        <button id="googleNavBtn" class="secondary">打开 Google Maps 导航</button>
+      </div>
+      <div id="navStatus" class="nav-status">还未获取手机位置。手机浏览器第一次会弹出定位授权，请选择允许。</div>
+    </section>
+
+    <section class="card">
+      <h2>6. 行程进度</h2>
       <div id="progress" class="progress-box">
         <div class="progress-empty">生成行程后，这里会显示当前进行到哪一站。</div>
       </div>
     </section>
 
     <section class="card">
-      <h2>6. 时间表</h2>
+      <h2>7. 时间表</h2>
       <div id="summary" class="summary">等待生成行程</div>
       <div id="timeline" class="timeline"></div>
     </section>
